@@ -1,4 +1,4 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
@@ -17,9 +17,8 @@ debug = (True if "--debug" in sys.argv else False)
 
 class Heartbeat(object):
     """
-    Deals with registering with the Minecraft main server every so often.
+    Deals with registering with the ClassiCube main server every so often.
     The Salt is also used to help verify users' identities.
-    Direct WoM Heartbeat info can be changed at https://direct.worldofminecraft.com/server.php
     """
 
     def __init__(self, factory):
@@ -52,18 +51,18 @@ class Heartbeat(object):
             getattr(self.factory, "heartbeats")
         except AttributeError:
             if self.factory.hbs != []: # Did we fill in the spoof heartbeat bit?
-                # Server has not finished loading yet - come back in 3 seconds
-                reactor.callLater(3, self.sendHeartbeat) 
+                reactor.callLater(3,
+                    self.sendHeartbeat) # Server has not finished loading yet - come back in 3 seconds maybe?
             return
         try:
             self._sendHeartbeat()
         except ImportError:
-            self.logger.info("WoM heartbeat has SSL enabled, and OpenSSL is not installed on the system. Falling back to minecraft.net heartbeat.")
+            self.logger.info(
+                "WoM heartbeat has SSL enabled, and OpenSSL is not installed on the system. Falling back to minecraft.net heartbeat.")
             self._sendHeartbeat(True)
 
     def _sendHeartbeat(self, overrideurl=False):
-        hburl = "http://direct.worldofminecraft.com/hb.php" if (
-        self.factory.wom_heartbeat and not overrideurl) else "http://www.minecraft.net/heartbeat.jsp"
+        hburl = "http://www.classicube.net/server/heartbeat"
         getPage(hburl, method="POST", postdata=self.hbdata,
             headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=30).addCallback(
             self.heartbeatSentCallback, 0).addErrback(self.heartbeatFailedCallback, 0)

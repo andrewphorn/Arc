@@ -1,11 +1,10 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
 import struct
 
 from arc.constants import *
-from arc.globals import packString
 
 class Format(object):
     def __init__(self, format):
@@ -36,9 +35,9 @@ class Format(object):
         data = ""
         for char, arg in zip(self.format, args):
             if char == "a": # Array, 1024 long
-                data += packString(arg[:1024], length=1024, packWith="\0")
+                data += self.packString(arg[:1024], length=1024, packWith="\0")
             elif char == "s": # String, 64 long
-                data += packString(arg[:64])
+                data += self.packString(arg[:64])
             elif char == "h": # Short
                 data += struct.pack("!h", arg)
             elif char == "i": # Integer
@@ -51,3 +50,6 @@ class Format(object):
                 else:
                     raise ValueError("Invalid value for byte: %r" % arg)
         return data
+
+    def packString(self, string, length=64, packWith=" "):
+        return string + (packWith * (length - len(string)))

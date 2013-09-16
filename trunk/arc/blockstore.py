@@ -1,4 +1,4 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
@@ -173,7 +173,7 @@ class BlockStore(Thread):
             if os.path.exists(self.blocks_path + ".new"):
                 os.remove(self.blocks_path + ".new")
             gz = gzip.GzipFile(self.blocks_path)
-            new_gz = gzip.GzipFile(self.blocks_path + ".new", 'wb', compresslevel=4)
+            new_gz = gzip.GzipFile(self.blocks_path + ".new", 'wb', compresslevel=2)
             # Copy over the size header
             new_gz.write(gz.read(4))
             # Order the blocks we're going to write

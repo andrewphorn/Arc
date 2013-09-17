@@ -2,7 +2,7 @@
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
-import cPickle, datetime, hashlib, os, traceback, shutil, zlib, StringIO, gzip,time, cStringIO
+import cPickle, datetime, hashlib, os, traceback, shutil, zlib, StringIO, gzip,time, cStringIO, string
 
 from twisted.internet import reactor
 from twisted.internet.protocol import Protocol
@@ -13,10 +13,15 @@ from arc.irc_client import ChatBotFactory
 from arc.plugins import protocol_plugins
 from arc.playerdata import *
 
+k, v = zip(*CPE_FALLBACKS.iteritems())
+k, v = ''.join(map(chr, k)), ''.join(map(chr, v))
+TBL = string.maketrans(k, v)
+del k
+del v
+
 def filter_blocks(st):
-    for x in CPE_FALLBACKS:
-        st = st.replace(chr(x),chr(CPE_FALLBACKS[x]))
-    return st
+    return st.translate(TBL)
+    
 
 class ArcServerProtocol(Protocol):
     """
@@ -921,7 +926,7 @@ class ArcServerProtocol(Protocol):
         self.unzipped_level = d.decompress(self.zipped_level.read())
         if not self.supports_cpe or self.cpe_b_supportlevel < 1:
             self.unzipped_level = filter_blocks(self.unzipped_level)
-            clevel = 4
+
         unzipped_level = self.unzipped_level # fuck my laziness
         if len(unzipped_level) < 100^3:
             clevel = 9
@@ -930,7 +935,7 @@ class ArcServerProtocol(Protocol):
         elif len(unzipped_level) < 250^3:
             clevel = 5
         elif len(unzipped_level) > 512^3:
-            clevel = 0
+            clevel = 2
         elif len(unzipped_level) > 251^3:
             clevel = 3
 

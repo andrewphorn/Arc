@@ -1,4 +1,4 @@
-# Arc is copyright 2009-2011 the Arc team and other contributors.
+﻿# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
@@ -73,13 +73,7 @@ def main():
             del controller
     config = ConfigParser()
     config.read("config/main.conf") # This can't fail because it has been checked before
-    factory.heartbeats = dict()
-    for element in factory.hbs:
-        name = config.get("heartbeatnames", element)
-        port = config.getint("heartbeatports", element)
-        factory.heartbeats[element] = (name, port)
-        reactor.listenTCP(port, factory)
-        logger.info("Starting spoofed heartbeat %s on port %s..." % (name, port))
+
     try:
         reactor.run()
     except Exception as e:

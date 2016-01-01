@@ -18,3 +18,4 @@
 *.suo
 *.pyproj
 trunk/trunk.sln
+trunk/config/greeting.txt

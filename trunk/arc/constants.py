@@ -1,4 +1,4 @@
-# Arc is copyright 2009-2011 the Arc team and other contributors.
+﻿# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
@@ -33,11 +33,7 @@ CONFIG = [
     , False, None),
     ("controller_password", ("main.conf", "network", "controller_port"), "self.use_controller == True", False, "get",
      None, False, None),
-    ("hbs", ("main.conf", "heartbeatnames", None), None, False, "options", None, True, None),
     ("duplicate_logins", ("options.conf", "options", "duplicate_logins"), None, True, "getboolean", None, False, False),
-    (
-    "wom_heartbeat", ("options.conf", "options", "wom_heartbeat"), None, True, "getboolean", "modifyHeartbeatURL", False
-    , False),
     ("enable_lowlag", ("options.conf", "options", "enable_lowlag"), None, True, "getboolean", None, False, False),
     ("lowlag_players", ("options.conf", "options", "lowlag_players"), None, True, "getint", None, False, 0),
     #("use_irc", ("irc.conf", "irc", "use_irc"), None, False, "getboolean", "initIRC", False, False),
@@ -63,14 +59,6 @@ CONFIG = [
     ]
 
 INFO_VIPLIST = [
-    # Mojang staff (current or retired)
-    "c418",
-    "dock",
-    "ez",
-    "jeb_",
-    "kappe",
-    "mollstam",
-    "notch",
     # Founders of Arc or other products before Arc
     "andrewgodwin",
     "pixeleater",
@@ -80,25 +68,10 @@ INFO_VIPLIST = [
     "uberfox",
     "opticalza",
     # Code contributors to products before Arc
-    "099",
-    "adam01",
     "andrewph",
-    "destroyerx1",
-    "dwarfy",
-    "erronjason",
-    "gdude2002",
-    "goober",
-    "gothfox",
-    "kelraider",
-    "notmeh",
-    "revenant",
-    "willempiee",
-    "varriount",
     # Others we give our bows to.
-    "fragmer",
-    "pyropyro",
-    "tktech",
-    "jte"
+    "scoot",
+	"unknownshadow200",
 ]
 
 FORMAT_LENGTHS = {

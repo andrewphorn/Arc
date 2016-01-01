@@ -1,10 +1,10 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
 #!/usr/bin/python
 
-import sys, time, traceback, os
+import  sys, time, traceback, os
 from ConfigParser import RawConfigParser as ConfigParser
 
 from twisted.internet import reactor
@@ -16,17 +16,22 @@ from arc.globals import *
 from arc.logger import ColouredLogger
 from arc.server import ArcFactory
 
-FILES_TO_MAKE = ["logs/", "logs/console/", "logs/levels/", # Log folders
-                "arc/archives/", # Archives
-                "config/data/"] # Config data
-makefiles(FILES_TO_MAKE)
+debug = (True if "--debug" in sys.argv else False)
+logger = ColouredLogger(debug)
+
+makefile("logs/")
+makefile("logs/console/")
+makefile("arc/archives/")
+makefile("logs/chat.log")
+makefile("logs/server.log")
+makefile("logs/staff.log")
+makefile("logs/whisper.log")
+makefile("logs/world.log")
+makefile("config/data/")
 makedatfile("config/data/balances.dat")
 makedatfile("config/data/inbox.dat")
 makedatfile("config/data/jail.dat")
 makedatfile("config/data/titles.dat")
-
-debug = (True if "--debug" in sys.argv else False)
-logger = ColouredLogger(debug)
 
 try:
     from colorama import init

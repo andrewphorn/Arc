@@ -1,8 +1,8 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
-import string, sys, time
+import os, string, sys, time
 
 from arc.globals import makefiles
 
@@ -140,6 +140,7 @@ class ColouredLogger(object):
         with open(self.logs[file], "a") as f:
             f.write(data + "\n")
             f.flush()
+            os.fsync(f.fileno())
             f.close()
 
     def info(self, data):
@@ -224,10 +225,8 @@ class ChatLogHandler(object):
         self._write((self.formatter if formatter == None else formatter) + "\n" % d)
 
     def _write(self, t):
-        try:
-            f = open(self.file, "a")
-            f.write(t)
-            f.flush()
-            f.close()
-        except IOError:
-            print("Unable to write out information. (Server overloaded?")
+        f = open(self.file, "a")
+        f.write(t)
+        f.flush()
+        os.fsync(f.fileno())
+        f.close()

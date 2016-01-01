@@ -1,4 +1,4 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
@@ -10,6 +10,7 @@ from arc.blockstore import BlockStore
 from arc.constants import *
 from arc.globals import *
 from arc.logger import ColouredLogger
+from arc.blocktracker import Tracker
 
 debug = (True if "--debug" in sys.argv else False)
 
@@ -35,18 +36,17 @@ class World(object):
         # Other settings
         self.ops = set()
         self.builders = set()
-        self.status = {
-            "cfgversion": (".".join([str(s) for s in CFGVERSION["world.meta"]])),
-            "owner": "n/a",
-            "all_build": True,
-            "private": False,
-            "is_archive": False,
-            "autoshutdown": True,
-            "saving": False,
-            "zoned": False,
-            "physics": False,
-            "finite_water": True
-        }
+        self.status = dict()
+        self.status["cfgversion"] = ".".join([str(s) for s in CFGVERSION["world.meta"]])
+        self.status["owner"] = "n/a"
+        self.status["all_build"] = True
+        self.status["private"] = False
+        self.status["is_archive"] = False
+        self.status["autoshutdown"] = True
+        self.status["saving"] = False
+        self.status["zoned"] = False
+        self.status["physics"] = False
+        self.status["finite_water"] = True
         self._physics = False
         self._finite_water = False
         self.portals = {}
@@ -68,7 +68,6 @@ class World(object):
         self.blockgets = {}
         # Current deferred to call after a flush is complete
         self.flush_deferred = None
-        self.factory.runHook("worldInstanceLoaded", {"world": self})
         if load:
             assert os.path.isfile(self.blocks_path), "No blocks file: %s" % self.blocks_path
             assert os.path.isfile(self.meta_path), "No meta file: %s" % self.blocks_path
@@ -76,6 +75,7 @@ class World(object):
 
     def start(self):
         "Starts up this World; we spawn a BlockStore, and run it."
+        self.blocktracker = Tracker("blocks", directory=self.basename)
         self.blockstore = BlockStore(self.blocks_path, self.x, self.y, self.z)
         self.blockstore.start()
         # If physics is on, turn it on
@@ -88,7 +88,11 @@ class World(object):
         "Signals the BlockStore to stop."
         self.blockstore.in_queue.put([TASK_STOP])
         self.save_meta()
-        self.factory.runHook("worldInstanceStopped", {"world": self})
+        try:
+            self.blocktracker.close()
+            del self.blocktracker
+        except AttributeError:
+            pass
 
     def read_queue(self):
         "Reads messages from the BlockStore and acts on them."
@@ -113,7 +117,7 @@ class World(object):
                         self.factory.queue.put((self, TASK_BLOCKSET, task[1]))
                     # Or there's a world message
                     elif task[0] is TASK_MESSAGE:
-                        self.factory.sendMessageToAll(task[1], "world", user="", fromloc="server")
+                        self.factory.sendMessageToAll(task[1], "world", user="")
                     # ???
                     else:
                         raise ValueError("Unknown World task: %s" % task)
@@ -179,7 +183,7 @@ class World(object):
             if config.has_option("options", "owner"):
                 self.status["owner"] = config.get("options", "owner").lower()
             else:
-                self.status["owner"] = ""
+                self.status["owner"] = "n/a"
             if config.has_option("options", "all_build"):
                 self.status["all_build"] = config.getboolean("options", "all_build")
             else:
@@ -275,7 +279,6 @@ class World(object):
                             elif entry[i] == "True":
                                 entry[i] = True
                     self.entitylist.append([entry[0], (entry[1], entry[2], entry[3])] + entry[4:])
-        self.factory.runHook("worldMetaLoaded", {"world": self, "config": config})
 
     @property
     def store_raw_blocks(self):
@@ -286,7 +289,6 @@ class World(object):
 
     def flush(self):
         self.blockstore.in_queue.put([TASK_FLUSH, self.saved])
-        self.factory.runHook("worldFlushed", {"world": self})
 
     def save_meta(self):
         config = ConfigParser()
@@ -358,13 +360,11 @@ class World(object):
         for i in range(len(self.entitylist)):
             entry = self.entitylist[i]
             config.set("entitylist", str(i), str(entry))
-        self.factory.runHook("preWorldMetaSave", {"world": self, "config": config})
         fp = open(self.meta_path, "w")
         config.write(fp)
         fp.flush()
         os.fsync(fp.fileno())
         fp.close()
-        self.factory.runHook("worldMetaSaved", {"world": self, "config": config})
 
     @classmethod
     def create(cls, basename, x, y, z, sx, sy, sz, sh, levels):
@@ -380,7 +380,6 @@ class World(object):
         world.spawn = (sx, sy, sz, sh)
         world.save_meta()
         world.load_meta()
-        self.factory.runHook("worldCreated", {"world": self})
         return world
 
     # The following methods should be simplified into 1 method
@@ -479,7 +478,7 @@ class World(object):
     def clear_mines(self):
         self.mines = []
 
-    # The above methods needs to be simplified into 1 method
+        # The above methods needs to be simplified into 1 method
 
     def isWorldBanned(self, name):
         return name.lower() in self.worldbans
@@ -522,7 +521,7 @@ class World(object):
         # Now, make the flush deferred if we haven't.
         if not self.flush_deferred:
             self.flush_deferred = Deferred()
-        # Next, make a deferred for us to return
+            # Next, make a deferred for us to return
         handle_deferred = Deferred()
         # Now, make a function that will call that on the first one
         def on_flush(result):
@@ -532,13 +531,4 @@ class World(object):
                 ))
 
         self.flush_deferred.addCallback(on_flush)
-        self.factory.runHook("worldGzipHandleRequestReceived", {"world": self})
         return handle_deferred
-
-    def backup(self, id=None):
-        """
-        Backs up self. Specify an id to use as the backup's name, or let the
-        method generate one.
-        Typically, you should call the factory's backupWorld method instead.
-        """
-        pass

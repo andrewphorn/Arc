@@ -15,3 +15,6 @@
 /trunk/data/players
 /trunk/worlds
 /trunk/config/data/spectators.meta
+*.suo
+*.pyproj
+trunk/trunk.sln

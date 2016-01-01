@@ -1,4 +1,4 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
@@ -13,15 +13,16 @@ except:
     NOSSL = True
 else:
     from twisted.internet import ssl
-from twisted.internet import defer, reactor, task
+from twisted.internet import reactor, task
 from twisted.internet.protocol import Factory
 
-from arc.console import Console
+from arc.console import StdinPlugin
 from arc.constants import *
 from arc.globals import *
 from arc.heartbeat import Heartbeat
 from arc.irc_client import ChatBotFactory
 from arc.logger import ColouredLogger, ChatLogHandler
+from arc.plugins import *
 from arc.protocol import ArcServerProtocol
 from arc.world import World
 
@@ -35,24 +36,14 @@ class ArcFactory(Factory):
         self.printable = string.printable
         self.logger = ColouredLogger(debug)
         self.cfginfo = {"version": defaultdict(str)}
-        self.plugins = {} # {"Name": class()}
+        # Load up the server plugins right away
+        self.logger.info("Loading server plugins..")
+        self.serverPlugins = {} # {"Name": class()}
         self.commands = {}
         self.hooks = {}
         self.aliases = {}
-        # Load up the plugins specified
-        self.plugins_config = ConfigParser.RawConfigParser()
-        try:
-            self.plugins_config.read("config/plugins.conf")
-        except Exception as e:
-            self.logger.error("Unable to read plugins.conf (%s)" % e)
-            sys.exit(1)
-        try:
-            plugins = self.plugins_config.options("plugins")
-        except Exception as e:
-            print ("Error parsing plugins.conf: %s" % e)
-            sys.exit(1)
-        self.loadPlugins(plugins)
-        self.logger.info("Loaded plugins.")
+        self.loadServerPlugins()
+        self.logger.info("Loaded server plugins.")
         # Initialise internal datastructures
         self.loops = {}
         self.worlds = {}
@@ -68,11 +59,12 @@ class ArcFactory(Factory):
         self.lastseen = {}
         self.default_loaded = False
         self.useLowLag = False
+        self.hooks = {}
         self.saving = False
         self.chatlogs = {}
         for k, v in MSGLOGFORMAT.items():
             self.chatlogs[k] = ChatLogHandler("logs/%s.log" % k, v)
-        # Load the config
+            # Load the config
         self.loadConfig()
         # Read in the greeting
         try:
@@ -81,6 +73,15 @@ class ArcFactory(Factory):
             r = open('config/greeting.example.txt', 'r')
         self.greeting = r.readlines()
         r.close()
+        # Read in the titles
+        file = open('config/data/titles.dat', 'r')
+        self.rank_dic = cPickle.load(file)
+        file.close()
+        # Read in the messages
+        if os.path.exists("config/data/inbox.dat"):
+            file = open('config/data/inbox.dat', 'r')
+            self.messages = cPickle.load(file)
+            file.close()
         self.use_irc = False
         if (os.path.exists("config/irc.conf")): # IRC bot will be updated soon, no need for cfginfo
             self.use_irc = True
@@ -112,7 +113,44 @@ class ArcFactory(Factory):
                 self.irc_relay = None
         else:
             self.irc_relay = None
+            # Word Filter
+        # Note: worldfilter.conf has no cfgversion at the moment, because we might rewrite this bit - g will know more
+        wordfilter = ConfigParser.RawConfigParser()
+        try:
+            wordfilter.read("config/wordfilter.conf")
+        except Exception as e:
+            self.logger.error("Unable to read wordfilter.conf (%s)" % e)
+            self.logger.error("Word filtering has been disabled.")
+            self.has_wordfilter = False
+        else:
+            self.has_wordfilter = True
+        self.filter = []
+        if self.has_wordfilter:
+            try:
+                number = int(wordfilter.get("filter", "count"))
+            except Exception as e:
+                self.logger.error("Error parsing wordfilter.conf (%s)" % e)
+                sys.exit(1)
+            for x in range(number):
+                self.filter = self.filter + [
+                    [wordfilter.get("filter", "s" + str(x)), wordfilter.get("filter", "r" + str(x))]]
+            # Load up the plugins specified
+        self.plugins_config = ConfigParser.RawConfigParser()
+        try:
+            self.plugins_config.read("config/plugins.conf")
+        except Exception as e:
+            self.logger.error("Unable to read plugins.conf (%s)" % e)
+            sys.exit(1)
+        try:
+            plugins = self.plugins_config.options("plugins")
+        except Exception as e:
+            print ("Error parsing plugins.conf: %s" % e)
+            sys.exit(1)
         self.runHook("configLoaded")
+        self.logger.info("Loading plugins...")
+        load_plugins(plugins)
+        self.runHook("pluginsLoaded")
+        self.logger.info("Loaded plugins.")
         # Open the chat log, ready for appending
         self.chatlog = open("logs/chat.log", "a")
         # Create a default world, if there isn't one.
@@ -160,7 +198,8 @@ class ArcFactory(Factory):
                 if not checkConfigVersion(self.cfginfo["version"][config[1][0]], CFGVERSION[config[1][0]]):
                     if config[1][0] in CFGVERSION:
                         # Inside official dist
-                        self.logger.error("You have an outdated %s, please redownload the Arc package and fill in the configuration again." %
+                        self.logger.error(
+                            "You have an outdated %s, please redownload the Arc package and fill in the configuration again." %
                             config[1][0])
                         sys.exit(1)
                     else:
@@ -245,7 +284,7 @@ class ArcFactory(Factory):
         if reload:
             self.loops["autobackup"].stop()
         elif self.backup_auto != False:
-            self.loops["autobackup"] = task.LoopingCall(self.autoBackup)
+            self.loops["autobackup"] = task.LoopingCall(self.AutoBackup)
 
     def modifyBackupFrequency(self, reload):
         "Called to start the backup loop."
@@ -280,288 +319,145 @@ class ArcFactory(Factory):
         self.blblimit["owner"] = config.getint("blb", "owner")
 
     # End of dummy callbacks
-    def loadPlugins(self, plugins, cleardata=True):
-        """Loads a set of plugins."""
-        if cleardata:
-            self.hooks = {} # Clear the list of hooks
-            self.commands = {} # Clear the list of server commands
-            self.aliases = {} # Clear the list of server command aliases
-        self.logger.info("Loading plugins..")
-        for plugin in plugins:
-            self.loadPlugin(plugin)
-        self.runHook("pluginsLoaded")
-
-    def loadPlugin(self, plugin, client=None):
-        """Loads a plugin."""
-        if "arc.plugins.%s" % plugin in sys.modules.keys(): # Check if we already imported it
-            self.logger.error("Plugin %s is already imported. Skipping." % plugin)
-            if client: client.sendServerMessage("Plugin %s is already imported." % plugin)
-            return
-        if not os.path.exists("arc/plugins/%s.py" % plugin):
-            self.logger.error("Plugin %s does not exist." % plugin)
-            if client: client.sendServerMessage("Plugin %s does not exist." % plugin)
-            return
-        #try:
-        __import__("arc.plugins.%s" % plugin) # If not, import it
-        #except Exception as a: # Got an error!
-        #    self.logger.error("Unable to load plugin from %s.py!" % plugin)
-        #    self.logger.error("Error: %s" % a)
-        #    self.logger.error(traceback.format_exc())
-        #    if client: client.sendServerMessage("Unable to load plugin from %s.py." % plugin)
-        #    return
-        try:
-            mod = sys.modules["arc.plugins.%s" % plugin].serverPlugin()
-            mod.name = mod.__class__.__name__ # What's the name?
-            mod.factory = self
-            mod.logger = self.logger
-            if hasattr(mod, "gotServer"): mod.gotServer()
-            if hasattr(self, "usernames"): # If this throws an AttributeError, we are booting up
-                if hasattr(mod, "hooks"):
-                    if "onPlayerConnect" in mod.hooks.keys():
-                        pc_hook = getattr(mod, mod.hooks["onPlayerConnect"])
-                        for p in self.usernames.values():
-                            pc_hook(p)
-        except Exception as a:
-            self.logger.error("Unable to load plugin from %s.py" % plugin)
-            self.logger.error("Error: %s" % a)
-            if client: client.sendServerMessage("Unable to load plugin from %s.py." % plugin)
-            return
-        self.plugins[plugin] = mod # Put it in the plugins list
-        self.logger.debug("Getting hooks and commands for plugin %s.." % plugin)
-        if hasattr(mod, "hooks"):
-            for element, fname in mod.hooks.items(): # For every hook in the plugin,
+    def loadServerPlugins(self, reload=False):
+        "Used to load up all the server plugins."
+        files = []
+        self.serverHooks = {} # Clear the list of hooks
+        self.logger.debug("Listing server plugins..")
+        for element in os.listdir("arc/serverplugins"): # List the plugins
+            ext = element.split(".")[-1]
+            file = element.split(".")[0]
+            if element == "__init__.py": # Skip the initialiser
+                continue
+            elif ext == "py": # Check if it ends in .py
+                files.append(file)
+        self.logger.debug("Possible server plugins (%s): %s" % (len(files), ".py, ".join(files) + ".py"))
+        self.logger.info("Loading server plugins..")
+        i = 0
+        while i < len(files):
+            element = files[i]
+            reloaded = False
+            if not "arc.serverplugins.%s" % element in sys.modules.keys(): # Check if we already imported it
                 try:
-                    func = getattr(mod, fname)
-                except AttributeError:
-                    self.logger.warn("Cannot find hook code for hook %s (plugin is %s)." % (element, mod))
-                    if client:
-                        client.sendSplitServerMessage("Cannot find hook code for hook %s (plugin is %s). Skipping..." % (element, mod))
+                    __import__("arc.serverplugins.%s" % element) # If not, import it
+                except Exception as a: # Got an error!
+                    self.logger.error("Unable to load server plugin from %s.py!" % element)
+                    self.logger.error("Error: %s" % a)
+                    i = i + 1
                     continue
-                if element not in self.hooks.keys():
-                    self.hooks[element] = [] # Make a note of the hook in the hooks dict
-                self.hooks[element].append([mod, getattr(mod, fname)])
-                self.logger.debug("Loaded hook '%s' for plugin '%s'." % (element, mod.name))
-        if hasattr(mod, "commands"):
-            for element, data in mod.commands.items():
+                else:
+                    try:
+                        mod = sys.modules[
+                              "arc.serverplugins.%s" % element].serverPlugin() # Grab the actual plugin class
+                        name = mod.name # What's the name?
+                        mod.factory = self
+                        mod.logger = self.logger
+                        if hasattr(mod, "gotServer"):
+                            mod.gotServer()
+                    except Exception as a:
+                        self.logger.error("Unable to load server plugin from %s" % (element + ".py"))
+                        self.logger.error("Error: %s" % a)
+                        i = i + 1
+                        continue
+            else: # We already imported it
+                mod = self.serverPlugins[element][0]
+                del mod
+                del self.serverPlugins[element]
+                del sys.modules["arc.serverplugins.%s" % element] # Unimport it by deleting it
                 try:
-                    func = getattr(mod, data)
-                except AttributeError:
-                    self.logger.warn("Cannot find command code for command %s (plugin is %s)." % (element, plugin))
-                    if client:
-                        client.sendSplitServerMessage("Cannot find command code for command %s (plugin is %s). Skipping..." % (element, plugin))
+                    __import__("arc.serverplugins.%s" % element) # import it again
+                except Exception as a: # Got an error!
+                    self.logger.error("Unable to load server plugin from %s.py!" % element)
+                    self.logger.error("Error: %s" % a)
+                    i = i + 1
                     continue
-                if element in self.commands.keys():
-                    self.logger.warn("Command %s is already registered. Overriding." % element)
-                self.commands[element] = func
-                if hasattr(func, "config"):
-                    for alias in func.config["aliases"]:
-                        if alias in self.aliases:
-                            self.logger.warn("Alias %s is already registered. Overriding." % alias)
-                        if client: client.sendServerMessage("Alias %s is already registered. Overriding." % alias)
-                        self.aliases[alias] = element
-                self.logger.debug("Loaded command '%s' for plugin '%s'." % (element, mod.name))
-        self.logger.info("Plugin %s loaded." % plugin)
-        if client: client.sendServerMessage("Plugin %s loaded." % plugin)
-        self.runHook("pluginLoaded", {"plugin": plugin, "client": client})
-
-    def unloadPlugin(self, plugin, client=None):
-        """Unloads a plugin."""
-        if not ("arc.plugins.%s" % plugin in sys.modules.keys()): # Check if we have imported it
-            self.logger.error("Plugin %s is not loaded." % plugin)
-            if client: client.sendServerMessage("Plugin %s is not loaded." % plugin)
-            return
-        mod = self.plugins[plugin]
-        if hasattr(mod, "properties"):
-            if "allow-unload" in mod.properties:
-                if not mod.properties["allow-unload"]:
-                    self.logger.error("Plugin %s does not allow unloading." % plugin)
-                    if client: client.sendServerMessage("Plugin %s does not allow unloading." % plugin)
-                    return
-        if hasattr(mod, "tearDown"):
-            mod.tearDown()
-        self.logger.debug("Unloading all hooks and commands for plugin %s.." % plugin)
-        if hasattr(mod, "hooks"):
-            for element, fname in mod.hooks.items(): # For every hook in the plugin,
-                if element in self.hooks.keys():
-                    del self.hooks[element]
-                self.logger.debug("Unloaded hook '%s' for plugin '%s'." % (element, mod.name))
-        if hasattr(mod, "commands"):
-            for element, data in mod.commands.items():
-                func = self.commands[element]
-                if hasattr(func, "config"):
-                    for alias in func.config["aliases"]:
-                        if alias in self.aliases:
-                            del self.aliases[alias]
-                del self.commands[element]
-                self.logger.debug("Unloaded command '%s' for plugin '%s'." % (element, mod.name))
-        del mod, self.plugins[plugin], sys.modules["arc.plugins.%s" % plugin] # Unimport it by deleting it
-        self.logger.info("Plugin %s unloaded." % plugin)
-        if client: client.sendServerMessage("Plugin %s unloaded." % plugin)
-        self.runHook("pluginUnloaded", {"plugin": plugin, "client": client})
-
-    def reloadPlugin(self, plugin, client=None):
-        """Reloads a plugin."""
-        if not ("arc.plugins.%s" % plugin in sys.modules.keys()): # Check if we have imported it
-            self.logger.error("Plugin %s is not loaded." % plugin)
-            if client: client.sendServerMessage("Plugin %s is not loaded." % plugin)
-            return
-        mod = self.plugins[plugin]
-        if hasattr(mod, "properties"):
-            if "allow-reload" in mod.properties:
-                if not mod.properties["allow-reload"]:
-                    self.logger.error("Plugin %s does not allow reloading." % plugin)
-                    if client: client.sendServerMessage("Plugin %s does not allow reloading." % plugin)
-                    return
-        self.unloadPlugin(plugin, client)
-        self.loadPlugin(plugin, client)
+                else:
+                    try:
+                        mod = sys.modules["arc.serverplugins.%s" % element].serverPlugin(self)
+                        name = mod.name # get the name
+                    except Exception as a:
+                        self.logger.error("Unable to load server plugin from %s" % (element + ".py"))
+                        self.logger.error("Error: %s" % a)
+                        i = i + 1
+                        continue
+                reloaded = True # Remember that we reloaded it
+            mod.filename = element
+            self.serverPlugins[name] = mod # Put it in the plugins list
+            if not reloaded:
+                self.logger.debug("Loaded server plugin: %s" % name)
+            else:
+                self.logger.debug("Reloaded server plugin: %s" % name)
+            i = i + 1
+        self.logger.debug("self.serverPlugins: %s" % self.serverPlugins)
+        #The following code should be handled by the ServerPlugins class and registerHook
+        self.logger.debug("Getting hooks..")
+        for plugin in self.serverPlugins.values(): # For every plugin,
+            for element, fname in plugin.hooks.items(): # For every hook in the plugin,
+                if element not in self.serverHooks.keys():
+                    self.serverHooks[element] = [] # Make a note of the hook in the hooks dict
+                self.serverHooks[element].append(
+                    [plugin, getattr(plugin, fname)]) # Make a note of the hook in the hooks dict
+                self.logger.debug("Loaded hook '%s' for server plugin '%s'." % (element, plugin.name))
+        self.logger.debug("self.serverHooks: %s" % self.serverHooks)
+        self.runHook("serverPluginsLoaded")
 
     def serverPluginExists(self, plugin):
-        return plugin in self.plugins.keys()
-
-    def runCommand(self, command, parts, fromloc, overriderank, client=None, username=None):
-        data = {"client": client, "command": command, "parts": parts, "fromloc": fromloc, "overriderank": overriderank}
-        if fromloc in ["user", "cmdblock"]: # User
-            user = client.username
-            def sendMessage(message):
-                client.sendServerMessage(message)
-        elif fromloc in ["irc", "irc_query"]: # IRC client
-            user = username if username != None else "IRC Client"
-            def sendMessage(message):
-                if username != None: # If we overrided the username
-                    client.msg(username, message)
-                else: # Else send this as a server message
-                    self.irc_relay.sendServerMessage(message)
-        elif fromloc == "console":
-            user = "Console"
-            def sendMessage(message):
-                print(message)
-        else: # Where does this come from?
-            self.logger.warn("Unknown source tried to run a command.")
-            self.logger.warn("Command: %s, fromloc: %s, client: %s" % (command, fromloc, repr(client)))
-            return
-        if command in self.commands.keys():
-            func = self.commands[command]
-        elif command in self.aliases.keys():
-            func = self.commands[self.aliases[command]]
-        else: # Nope, did't find it
-            sendMessage("Command %s does not exist." % command)
-            return
-        if hasattr(func, "config"):
-            config = func.config
-        else:
-            config = {"aliases": "", "usage": "", "rank": "guest", "disabled-on": "", "category": ""}
-        # Check if the command can be run from that source.
-        if fromloc == "user" and "user" in config["disabled-on"]:
-            sendMessage("This command cannot be run from the game.")
-            self.logger.info("%s just tried '%s' but it has been disabled for in-game users." % (user, " ".join(parts)))
-            return
-        elif fromloc == "cmdblock" and "cmdblock" in config["disabled-on"]:
-            sendMessage("This command cannot be run from a cmdblock.")
-            self.logger.info("%s just tried '%s' but it has been disabled for CMD Block usage." % (user, " ".join(parts)))
-            return
-        elif fromloc == "irc" and "irc" in config["disabled-on"]:
-            sendMessage("This command cannot be run from the IRC Client.")
-            self.logger.info("%s just tried '%s' but it has been disabled for the IRC Client." % (user, " ".join(parts)))
-            return
-        elif fromloc == "irc_query" and "irc_query" in config["disabled-on"]:
-            sendMessage("This command cannot be run from an IRC query.")
-            self.logger.info("%s just tried '%s' but it has been disabled from an IRC query." % (user, " ".join(parts)))
-            return
-        elif fromloc == "console" and "console" in config["disabled-on"]:
-            sendMessage("This command cannot be run from the console.")
-            return
-        if config["disabled"] and (fromloc == "user" and not client.isOwner()): # Owners and server can run anything 
-            sendMessage("Command %s has been disabled by the server owner." % command)
-            self.logger.info("%s just tried '%s' but it has been disabled." % (user, " ".join(parts)))
-            return
-        if fromloc == "user": # Rank checking for in-game users
-            if client.isSpectator() and config["rank"]:
-                sendMessage("'%s' is not available to spectators." % command)
-                self.logger.info("%s just tried '%s' but is a spectator." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "owner" and not client.isOwner():
-                sendMessage("'%s' is an Owner-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not an owner." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "director" and not client.isDirector():
-                sendMessage("'%s' is a Director-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not a director." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "admin" and not client.isAdmin():
-                sendMessage("'%s' is an Admin-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not an admin." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "mod" and not client.isMod():
-                sendMessage("'%s' is a Mod-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not a mod." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "helper" and not client.isHelper():
-                sendMessage("'%s' is a Helper-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not a helper." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "worldowner" and not client.isWorldOwner():
-                sendMessage("'%s' is an WorldOwner-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not a world owner." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "op" and not client.isOp():
-                sendMessage("'%s' is an Op-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not an op." % (user, " ".join(parts)))
-                return
-            if config["rank"] == "builder" and not client.isBuilder():
-                sendMessage("'%s' is a Builder-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not a builder." % (user, " ".join(parts)))
-                return
-        elif fromloc == "irc" or fromloc == "irc_query":
-            if not username in self.irc_relay.instance.ops:
-                sendMessage("'%s' is an channelop-only command!" % command)
-                self.logger.info("%s just tried '%s' but is not a channel operator." % (user, " ".join(parts)))
-                return
-        # Using custom message?
-        if config["custom_cmdlog_msg"]:
-            self.logger.command("%s %s" % (user, config["custom_cmdlog_msg"]))
-            if self.irc_relay and self.irc_cmdlogs:
-                self.irc_relay.sendServerMessage("%s %s" % (user, config["custom_cmdlog_msg"]))
-        else:
-            self.logger.command("(%s) /%s" % (user, " ".join(parts)))
-            if self.irc_relay and self.irc_cmdlogs:
-                self.irc_relay.sendServerMessage("%s just used: /%s" % (user, " ".join(parts)))
-        try:
-            func(data)
-        except Exception as e:
-            sendMessage("Unable to run that command!")
-            sendMessage("Error: %s" % e)
-            sendMessage("Please report this to the staff!")
-            self.logger.error("Error in command '%s': %s" % (command.title(), e))
-            error = traceback.format_exc()
-            errorsplit = error.split("\n")
-            for element in errorsplit:
-                if not element.strip(" ") == "":
-                    self.logger.error(element)
+        return plugin in self.serverPlugins.keys()
 
     def runHook(self, hook, data=None):
-        """Used to run hooks for plugins"""
-        finaldata = []
-        if hook in self.hooks.keys():
-            for element in self.hooks[hook]:
-                self.logger.debug("Ran hook %s" % hook)
+        "Used to run hooks for ServerPlugins"
+        finalvalue = True
+        if hook in self.serverHooks.keys():
+            for element in self.serverHooks[hook]:
                 if data is not None:
                     value = element[1](data)
                 else:
                     value = element[1]()
-                if value is not None:
-                    return value
-        return None # Stupid workaround, need to fix
+                if value == False:
+                    finalvalue = False
+        return finalvalue
+
+    def registerCommand(self, command, func, aliases, rank):
+        "Registers func as the handler for the command named 'command'."
+        # Make sure case doesn't matter
+        command = command.lower()
+        aliases = [i.lower() for i in aliases]
+        # Warn if already registered
+        if command in self.commands:
+            self.logger.warn("Command '%s' is already registered. Overriding." % command)
+            # Register
+        self.commands[command] = (func, aliases)
+        for alias in aliases:
+            # Register the aliases
+            self.aliases[alias] = command
+
+    def unregisterCommand(self, command, func):
+        "Unregisters func as command's handler, if it is currently the handler."
+        # Make sure case doesn't matter
+        command = command.lower()
+        try:
+            if self.commands[command][0] == func:
+                del self.commands[command]
+                for key, value in self.aliases:
+                    if value == command:
+                        del self.aliases[key]
+        except KeyError:
+            self.factory.logger.warn("Command '%s' is not registered to %s." % (command, func))
+
+    def unregisterHook(self, hook):
+        pass # To be implemented
 
     def buildProtocol(self, addr):
+        "Builds the protocol. Used to switch between Manic Digger and Minecraft."
+        # Some male/female/alien idenfication code here
         p = self.protocol()
         p.factory = self
         self.runHook("protocolBuilt")
         return p
 
     def startFactory(self):
-        self.console = Console(self)
+        self.console = StdinPlugin(self)
         self.console.start()
-        self.runHook("consoleLoaded")
         self.heartbeat = Heartbeat(self)
         self.runHook("heartbeatStarted")
         # Boot default
@@ -801,7 +697,8 @@ class ArcFactory(Factory):
 
     def saveWorld(self, world_id, shutdown=False):
         value = self.runHook("worldSaving", {"world_id": world_id, "shutdown": shutdown})
-        if value is False: return
+        if not value:
+            return
         try:
             world = self.worlds[world_id]
             world.save_meta()
@@ -819,12 +716,6 @@ class ArcFactory(Factory):
                 self.clients[i] = client
                 self.runHook("idClaimed", {"id": i, "client": client})
                 return i
-        # Server is full, claim ID only for staff
-        if client.isHelper():
-            i = len(self.clients.keys()) + 1
-            self.clients[i] = client
-            self.runHook("idClaimed", {"id": i, "client": client})
-            return i
         raise ServerFull
 
     def releaseId(self, id):
@@ -834,7 +725,7 @@ class ArcFactory(Factory):
     def joinWorld(self, worldid, user):
         "Makes the user join the given World."
         value = self.runHook("worldJoining", {"world_id": worldid, "client": user})
-        if value is False:
+        if not value:
             return self.worlds[user.world.id]
         new_world = self.worlds[worldid]
         try:
@@ -929,193 +820,221 @@ class ArcFactory(Factory):
         self.runHook("lastseenRecorded", {"username": username, "time": time.time()})
         self.lastseen[username.lower()] = time.time()
 
+    def unloadPlugin(self, plugin_name):
+        "Unloads the plugin with the given module name."
+        # Unload the plugin from everywhere
+        for plugin in plugins_by_module_name(plugin_name):
+            if issubclass(plugin, ProtocolPlugin):
+                for client in self.clients.values():
+                    client.unloadPlugin(plugin)
+            elif issubclass(plugin, ServerPlugin):
+                self.plugins.remove(plugin)
+                plugin.unregister()
+            # Unload it
+        unload_plugin(plugin_name)
+        self.runHook("pluginUnloaded", {"plugin_name": plugin_name})
+
+    def loadPlugin(self, plugin_name):
+        # Load it
+        load_plugin(plugin_name)
+        # Load it back into clients etc.
+        for plugin in plugins_by_module_name(plugin_name):
+            if issubclass(plugin, ProtocolPlugin):
+                for client in self.clients.values():
+                    client.loadPlugin(plugin)
+            elif issubclass(plugin, ServerPlugin):
+                plugins.append(plugins_by_module_name(plugin_name))
+        self.runHook("pluginLoaded", {"plugin_name": plugin_name})
+
     def sendMessages(self):
         "Sends all queued messages, and lets worlds recieve theirs."
         try:
             while True: # I don't get this line? -tyteen
                 # Get the next task
                 source_client, task, data = self.queue.get_nowait()
-                if isinstance(source_client, World):
-                    world = source_client
-                elif isinstance(source_client, Console): # Console
-                    world = self.worlds[self.default_name]
-                else:
-                    try:
-                        world = source_client.world
-                    except AttributeError:
+                try:
+                    if isinstance(source_client, World):
+                        world = source_client
+                    elif isinstance(source_client, StdinPlugin): # Console
                         world = self.worlds[self.default_name]
-                time = datetime.datetime.utcnow().strftime("%Y/%m/%d %H:%M:%S")
-                # Someone built/deleted a block
-                if task is TASK_BLOCKSET:
-                    value = self.runHook("onBlockset", {"client": source_client, "data": data})
-                    if value is not False:
-                        world.status["modified"] = True
+                    else:
+                        try:
+                            world = source_client.world
+                        except AttributeError:
+                            world = self.worlds[self.default_name]
+                    time = datetime.datetime.utcnow().strftime("%Y/%m/%d %H:%M:%S")
+                    # Someone built/deleted a block
+                    if task is TASK_BLOCKSET:
+                        value = self.runHook("onBlockset", {"client": source_client, "data": data})
+                        if value:
+                            world.status["modified"] = True
+                            # Only run it for clients who weren't the source.
+                            for client in world.clients:
+                                if client is not source_client:
+                                    client.sendBlock(*data)
+                    # Someone moved
+                    elif task is TASK_PLAYERPOS:
+                        value = self.runHook("onPlayerPos", {"client": source_client, "data": data})
+                        if value:
                         # Only run it for clients who weren't the source.
-                        for client in world.clients:
-                            if client is not source_client:
-                                client.sendBlock(*data)
-                # Someone moved
-                elif task is TASK_PLAYERPOS:
-                    value = self.runHook("onPlayerPos", {"client": source_client, "data": data})
-                    if value is not False:
-                    # Only run it for clients who weren't the source.
-                        for client in world.clients:
-                            if client != source_client:
-                                client.sendPlayerPos(*data)
-                # Someone moved only their direction
-                elif task is TASK_PLAYERDIR:
-                    value = self.runHook("onPlayerDir")
-                    if value is not False:
+                            for client in world.clients:
+                                if client != source_client:
+                                    client.sendPlayerPos(*data)
+                    # Someone moved only their direction
+                    elif task is TASK_PLAYERDIR:
+                        value = self.runHook("onPlayerDir")
+                        if value:
+                            # Only run it for clients who weren't the source.
+                            for client in world.clients:
+                                if client != source_client:
+                                    client.sendPlayerDir(*data)
+                    # Someone finished a mass replace that requires respawn for everybody.
+                    elif task is TASK_INSTANTRESPAWN:
+                        value = self.runHook("onInstantRespawn")
+                        if value:
+                            for client in world.clients:
+                                # Save their initial position
+                                client.initial_position = client.x >> 5, client.y >> 5, client.z >> 5, client.h
+                                client.sendPlayerLeave(data)
+                                client.loading_world = True
+                                breakable_admins = client.runHook("canbreakadmin")
+                                client.sendPacked(TYPE_INITIAL, 7, ("%s: %s" % (self.server_name, world.id)),
+                                    "Respawning world '%s'..." % world.id, 100 if breakable_admins else 0)
+                                client.sendLevel()
+                    # Someone connected to the server
+                    elif task is TASK_PLAYERCONNECT:
+                        for client in self.usernames:
+                            self.usernames[client].sendNewPlayer(*data)
+                            if not self.useLowLag:
+                                self.usernames[client].sendNormalMessage(
+                                    "%s%s&e has come online." % (source_client.userColour(), source_client.username))
+                        if self.irc_relay and world:
+                            if not self.useLowLag:
+                                self.irc_relay.sendServerMessage("07%s has come online." % source_client.username)
+                    # Someone joined a world!
+                    elif task is TASK_NEWPLAYER:
+                        value = self.runHook("onNewPlayer", {"client": source_client})
+                        if value:
+                            for client in world.clients:
+                                if client != source_client:
+                                    client.sendNewPlayer(*data)
+                                sendmessage = self.runHook("worldChanged", {"client": source_client})
+                                if sendmessage and not self.useLowLag:
+                                    client.sendNormalMessage("%s%s&e has joined the world." % (
+                                    source_client.userColour(), source_client.username))
+                    # Someone left!
+                    elif task is TASK_PLAYERLEAVE:
+                        self.runHook("onPlayerLeave", {"client": source_client, "skipmsg": data})
                         # Only run it for clients who weren't the source.
-                        for client in world.clients:
-                            if client != source_client:
-                                client.sendPlayerDir(*data)
-                # Someone finished a mass replace that requires respawn for everybody.
-                elif task is TASK_INSTANTRESPAWN:
-                    value = self.runHook("onInstantRespawn")
-                    if value is not False:
-                        for client in world.clients:
-                            # Save their initial position
-                            client.initial_position = client.x >> 5, client.y >> 5, client.z >> 5, client.h
-                            client.sendPlayerLeave(data)
-                            client.loading_world = True
-                            breakable_admins = client.runHook("canbreakadmin")
-                            client.sendPacked(TYPE_INITIAL, 7, ("%s: %s" % (self.server_name, world.id)),
-                                "Respawning world '%s'..." % world.id, 100 if breakable_admins else 0)
-                            client.sendLevel()
-                # Someone connected to the server
-                elif task is TASK_PLAYERCONNECT:
-                    for client in self.usernames:
-                        self.usernames[client].sendNewPlayer(*data)
-                        if not self.useLowLag:
-                            self.usernames[client].sendNormalMessage(
-                                "%s%s&e has come online." % (source_client.userColour(), source_client.username))
-                    if self.irc_relay and world:
-                        if not self.useLowLag:
-                            self.irc_relay.sendServerMessage("07%s has come online." % source_client.username)
-                # Someone joined a world!
-                elif task is TASK_NEWPLAYER:
-                    value = self.runHook("onNewPlayer", {"client": source_client})
-                    if value is not False:
-                        for client in world.clients:
-                            if client != source_client:
-                                client.sendNewPlayer(*data)
-                            sendmessage = self.runHook("worldChanged", {"client": source_client})
-                            if sendmessage and not self.useLowLag:
-                                client.sendNormalMessage("%s%s&e has joined the world." % (
-                                source_client.userColour(), source_client.username))
-                # Someone left!
-                elif task is TASK_PLAYERLEAVE:
-                    self.runHook("onPlayerLeave", {"client": source_client, "skipmsg": data})
-                    # Only run it for clients who weren't the source.
-                    for client in self.clients.values():
-                        client.sendPlayerLeave(data[0])
-                        if not source_client.username is None and not self.useLowLag:
-                            client.sendNormalMessage(
-                                "%s%s&e has gone offline." % (source_client.userColour(), source_client.username))
-                    if not source_client.username is None:
+                        for client in self.clients.values():
+                            client.sendPlayerLeave(data[0])
+                            if not source_client.username is None and not self.useLowLag:
+                                client.sendNormalMessage(
+                                    "%s%s&e has gone offline." % (source_client.userColour(), source_client.username))
+                        if not source_client.username is None:
+                            if self.irc_relay and world and not self.useLowLag:
+                                self.irc_relay.sendServerMessage("07%s has gone offline." % source_client.username)
+                    # Someone changed worlds!
+                    elif task is TASK_WORLDCHANGE:
+                        self.runHook("onWorldChange", {"client": source_client, "world": world})
+                        # Only run it for clients who weren't the source.
+                        for client in data[1].clients:
+                            client.sendPlayerLeave(data[0])
+                            if not self.useLowLag:
+                                client.sendNormalMessage("%s%s&e joined '%s'" % (
+                                source_client.userColour(), source_client.username, world.id))
                         if self.irc_relay and world and not self.useLowLag:
-                            self.irc_relay.sendServerMessage("07%s has gone offline." % source_client.username)
-                # Someone changed worlds!
-                elif task is TASK_WORLDCHANGE:
-                    self.runHook("onWorldChange", {"client": source_client, "world": world})
-                    # Only run it for clients who weren't the source.
-                    for client in data[1].clients:
-                        client.sendPlayerLeave(data[0])
-                        if not self.useLowLag:
-                            client.sendNormalMessage("%s%s&e joined '%s'" % (
-                            source_client.userColour(), source_client.username, world.id))
-                    if self.irc_relay and world and not self.useLowLag:
-                        self.irc_relay.sendServerMessage("07%s joined '%s'" % (source_client.username, world.id))
-                    self.logger.info("%s%s&f has now joined '%s'" % (
-                    source_client.userColour(), source_client.username, world.id))
-                elif task == TASK_PLAYERRESPAWN:
-                    # We need to immediately respawn the user to update their nick.
-                    self.runHook("onPlayerRespawn", {"client": source_client})
-                    for client in world.clients:
-                        if client != source_client:
-                            id, username, x, y, z, h, p = data
-                            client.sendPlayerLeave(id)
-                            client.sendNewPlayer(id, username, x, y, z, h, p)
-                # Messages
-                elif task is TASK_MESSAGE:
-                    # More Word Filter
-                    id, colour, username, text, channel, theWorld = data
-                    value = self.runHook("onMessage",
-                            {"id": id, "colour": colour, "username": username, "text": text, "channel": channel,
-                             "world": (world if theWorld == None else theWorld)})
-                    if value is not False:
-                        # Send the message to everybody
-                        if channel == "world":
-                            if theWorld != None:
-                                for client in self.worlds[theWorld].clients: # World was overriden
-                                    client.sendNormalMessage(
-                                        "%s!%s%s%s: %s" % (COLOUR_YELLOW, colour, username, COLOUR_WHITE, text))
-                            else:
-                                for client in world.clients:
-                                    client.sendNormalMessage(
-                                        "%s!%s%s%s: %s" % (COLOUR_YELLOW, colour, username, COLOUR_WHITE, text))
-                        else:
-                            for client in self.clients.values():
-                                if channel == "staff" and client.isMod():
-                                    client.sendMessage(id, COLOUR_YELLOW + "#" + colour, username, text)
-                                elif channel == "action":
-                                    client.sendAction(id, colour, username, text)
-                                elif channel == "server":
-                                    client.sendNormalMessage(text)
-                                elif channel == "irc":
-                                    client.sendMessage(id, ("[IRC] %s" % COLOUR_PURPLE), username, text)
+                            self.irc_relay.sendServerMessage("07%s joined '%s'" % (source_client.username, world.id))
+                        self.logger.info("%s%s&f has now joined '%s'" % (
+                        source_client.userColour(), source_client.username, world.id))
+                    elif task == TASK_PLAYERRESPAWN:
+                        # We need to immediately respawn the user to update their nick.
+                        self.runHook("onPlayerRespawn", {"client": source_client})
+                        for client in world.clients:
+                            if client != source_client:
+                                id, username, x, y, z, h, p = data
+                                client.sendPlayerLeave(id)
+                                client.sendNewPlayer(id, username, x, y, z, h, p)
+                    # Messages
+                    elif task is TASK_MESSAGE:
+                        # More Word Filter
+                        id, colour, username, text, channel, theWorld = data
+                        value = self.runHook("onMessage",
+                                {"id": id, "colour": colour, "username": username, "text": text, "channel": channel,
+                                 "world": (world if theWorld == None else theWorld)})
+                        if value:
+                            text = self.messagestrip(text)
+                            # Send the message to everybody
+                            if channel == "world":
+                                if theWorld != None:
+                                    for client in self.worlds[theWorld].clients: # World was overriden
+                                        client.sendNormalMessage(
+                                            "%s!%s%s%s: %s" % (COLOUR_YELLOW, colour, username, COLOUR_WHITE, text))
                                 else:
-                                    client.sendMessage(id, colour, username, text)
-                            # Log them
-                        log = True
-                        if channel == "chat":
-                            self.logger.info("%s&f: %s" % (username, text))
-                        elif channel == "irc":
-                            self.logger.irc("%s %s" % ((("<%s>" % username) if username != "" else ""), text))
-                        elif channel == "staff":
-                            self.logger.info("#%s: %s" % (username, text))
-                        elif channel == "action":
-                            self.logger.info("* %s %s" % (username, text))
-                        elif channel == "world":
-                            w = (str(world.id) if theWorld == None else theWorld)
-                            self.logger.info("%s in %s: %s" % (username, w, text))
-                            self.chatlogs["world"].write(
-                                    {"time": time, "username": username, "world": w, "text": text})
-                            self.chatlogs["main"].write(
-                                    {"time": time, "username": username, "world": w, "text": text},
-                                formatter=MSGLOGFORMAT["world"])
-                            log = False
-                        elif channel == "server":
-                            self.logger.info(text)
-                        else: # This message has no channel, just dump everything we see
-                            self.logger.warn("Message has no channel. Data: (%s, %s, %s, %s, %s)" % (
-                            id, colour, username, text, channel))
-                            continue
-                        if log:
-                            self.chatlogs[channel].write({"time": time, "username": username, "text": text})
-                            self.chatlogs["main"].write({"time": time, "username": username, "text": text},
-                                formatter=MSGLOGFORMAT[channel])
-                            # Relay it to the IRC
-                        if self.irc_relay and world and channel not in ["irc", "staff"]:
-                            if channel == "action":
-                                self.irc_relay.sendAction(username, text)
-                            elif channel == "world":
-                                self.irc.relay.sendMessage(
-                                    "%s!%s in %s" % (COLOUR_YELLOW, colour + username + COLOUR_BLACK, world), text)
+                                    for client in world.clients:
+                                        client.sendNormalMessage(
+                                            "%s!%s%s%s: %s" % (COLOUR_YELLOW, colour, username, COLOUR_WHITE, text))
                             else:
-                                self.irc_relay.sendMessage(username, text)
+                                for client in self.clients.values():
+                                    if channel == "staff" and client.isMod():
+                                        client.sendMessage(id, COLOUR_YELLOW + "#" + colour, username, text)
+                                    elif channel == "action":
+                                        client.sendAction(id, colour, username, text)
+                                    elif channel == "server":
+                                        client.sendNormalMessage(text)
+                                    elif channel == "irc":
+                                        client.sendMessage(id, "[IRC] %s" % COLOUR_PURPLE, username, text)
+                                    else:
+                                        client.sendMessage(id, colour, username, text)
+                                # Log them
+                            log = True
+                            if channel == "chat":
+                                self.logger.info("%s&f: %s" % (username, text))
+                            elif channel == "irc":
+                                self.logger.irc("%s %s" % ((("<%s>" % username) if username != "" else ""), text))
+                            elif channel == "staff":
+                                self.logger.info("#%s: %s" % (username, text))
+                            elif channel == "action":
+                                self.logger.info("* %s %s" % (username, text))
+                            elif channel == "world":
+                                w = (str(world.id) if theWorld == None else theWorld)
+                                self.logger.info("%s in %s: %s" % (username, w, text))
+                                self.chatlogs["world"].write(
+                                        {"time": time, "username": username, "world": w, "text": text})
+                                self.chatlogs["main"].write(
+                                        {"time": time, "username": username, "world": w, "text": text},
+                                    formatter=MSGLOGFORMAT["world"])
+                                log = False
+                            elif channel == "server":
+                                self.logger.info(text)
+                            else: # This message has no channel, just dump everything we see
+                                self.logger.warn("Message has no channel. Data: (%s, %s, %s, %s, %s)" % (
+                                id, colour, username, text, channel))
+                                continue
+                            if log:
+                                self.chatlogs[channel].write({"time": time, "username": username, "text": text})
+                                self.chatlogs["main"].write({"time": time, "username": username, "text": text},
+                                    formatter=MSGLOGFORMAT[channel])
+                                # Relay it to the IRC
+                            if self.irc_relay and world and channel not in ["irc", "staff"]:
+                                if channel == "action":
+                                    self.irc_relay.sendAction(username, text)
+                                elif channel == "world":
+                                    self.irc.relay.sendMessage(
+                                        "%s!%s in %s" % (COLOUR_YELLOW, colour + username + COLOUR_BLACK, world), text)
+                                else:
+                                    self.irc_relay.sendMessage(username, text)
+                except Exception as e:
+                    self.logger.error(traceback.format_exc())
         except Empty:
             pass
-        except Exception as e:
-            self.logger.error(traceback.format_exc())
-        # OK, now, for every world, let them read their queues
+            # OK, now, for every world, let them read their queues
         for world in self.worlds.values():
             world.read_queue()
 
-    def sendMessageToAll(self, message, channel="chat", client=None, id=None, colour=None, user=None, world=None, fromloc="user"):
+    def sendMessageToAll(self, message, channel="chat", client=None, id=None, colour=None, user=None, world=None):
         """Quick method for sending message to all clients."""
-        if client == None or fromloc != "user":
+        if client == None:
             uid = id if id != None else 127
             c = colour if colour != None else COLOUR_WHITE
             username = user if user != None else "Server"
@@ -1124,7 +1043,7 @@ class ArcFactory(Factory):
             uid = id if id != None else client.id
             c = colour if colour != None else client.userColour()
             username = user if user != None else client.username
-            w = world if world != None else client.world.id
+            w = world if world != None else client.username
         self.queue.put((client, TASK_MESSAGE, (uid, c, username, message, channel, w)))
 
     def newWorld(self, new_name, template="default"):
@@ -1212,50 +1131,66 @@ class ArcFactory(Factory):
         "Says if the world exists (even if unbooted)"
         return os.path.isdir("worlds/%s/" % world_id)
 
-    def autoBackup(self):
+    # The following code needs to be rewritten
+    def AutoBackup(self):
         for world in self.worlds:
             if world.status["modified"] == True:
-                self.doBackup(world, "server", None)
+                self.Backup(world)
                 # Reset modification flag
                 world.status["modified"] = False
 
-    def doBackup(self, world_id, fromloc, id=None):
+    def Backup(self, world_id):
         world_dir = ("worlds/%s/" % world_id)
-        if world_id == self.default_name and (not self.backup_default and fromloc == "server"):
-            # Server is backing up default
-            return (0, 1)
+        if world_id == self.default_name and not self.backup_default:
+            return
         if not os.path.exists(world_dir):
-            # World does not exist
-            return (0, 2)
+            self.logger.info("World %s does not exist." % (world.id))
+            return
         if not os.path.exists(world_dir + "backup/"):
             os.mkdir(world_dir + "backup/")
-        if id != None:
-            path = os.path.join(world_dir + "backup/", parts[2])
-            if os.path.exists(path):
-                return (0, 3) # Named backup exists
-        else:
-            backups = list([])
-            for x in folders:
-                if x.isdigit():
-                    backups.append(x)
-            backups.sort(lambda x, y: int(x) - int(y))
-            path = os.path.join(world_dir + "backup/", "0")
-            if backups:
-                path = os.path.join(world_dir + "backup/", str(int(backups[-1]) + 1))
+        folders = os.listdir(world_dir + "backup/")
+        backups = list([])
+        for x in folders:
+            if x.isdigit():
+                backups.append(x)
+        backups.sort(lambda x, y: int(x) - int(y))
+        path = os.path.join(world_dir + "backup/", "0")
+        if backups:
+            path = os.path.join(world_dir + "backup/", str(int(backups[-1]) + 1))
         os.mkdir(path)
         shutil.copy(world_dir + "blocks.gz", path)
         shutil.copy(world_dir + "world.meta", path)
-        if id == None:
-            try:
-                backupname = str(int(backups[-1]) + 1)
-            except:
-                backupname = 0
-        else: backupname = id
+        try:
+            self.logger.info("%s's backup %s is saved." % (world_id, str(int(backups[-1]) + 1)))
+        except:
+            self.logger.info("%s's backup 0 is saved." % (world_id))
         if len(backups) + 1 > self.backup_max:
             for i in range(0, ((len(backups) + 1) - self.backup_max)):
                 shutil.rmtree(os.path.join(world_dir + "backup/", str(int(backups[i]))))
-        self.runHook("onBackup", {"world_id": world_id, "backupname": backupname, "fromloc": fromloc})
-        return (1, backupname)
+        self.runHook("onBackup", {"world_id": world_id})
+
+        # The above code needs to be rewritten
+
+    def messagestrip(self, message):
+        if self.has_wordfilter:
+            strippedmessage = ""
+            for x in message:
+                if isinstance(x, list):
+                    strippedmessage = strippedmessage + self.messagestrip(x)
+                elif isinstance(x, str):
+                    if str(x) in self.printable:
+                        strippedmessage = strippedmessage + str(x)
+                else:
+                    self.logger.error("Unknown message type passed to the message stripper.")
+                    self.logger.error("Data: %s" % x)
+                    return "Error!"
+            message = strippedmessage
+            for x in self.filter:
+                rep = re.compile(x[0], re.IGNORECASE)
+                message = rep.sub(x[1], message)
+            return message
+        else: # No word filter, just return the message
+            return message
 
     def loadArchives(self):
         self.archives = {}
@@ -1304,27 +1239,3 @@ class ArcFactory(Factory):
             except:
                 return False
         return False
-
-    def applyBlockChanges(self, changeset, world, save=True, secperloop=10):
-        """Applies block changes."""
-        # Check if world is booted
-        if world not in self.worlds:
-            raise ValueError, "World not booted"
-        else:
-            w = self.worlds[world]
-        d = defer.Deferred()
-        iter = changeset.iteritems()
-        def doStep():
-            try:
-                for x in range(secperloop):
-                    key, value = iter.next()
-                    x, y, z = key
-                    if save: w[x, y, z] = value
-                    self.queue.add((w, TASK_BLOCKSET, (x, y, z, value)))
-                    reactor.callLater(0.01, doStep)
-            except StopIteration:
-                d.callback(True)
-            except Exception as e:
-                d.errback(e)
-        doStep()
-        return d

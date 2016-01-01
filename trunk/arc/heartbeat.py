@@ -1,4 +1,4 @@
-# Arc is copyright 2009-2012 the Arc team and other contributors.
+# Arc is copyright 2009-2011 the Arc team and other contributors.
 # Arc is licensed under the BSD 2-Clause modified License.
 # To view more details, please see the "LICENSING" file in the "docs" folder of the Arc Package.
 
@@ -52,13 +52,14 @@ class Heartbeat(object):
             getattr(self.factory, "heartbeats")
         except AttributeError:
             if self.factory.hbs != []: # Did we fill in the spoof heartbeat bit?
-                # Server has not finished loading yet - come back in 3 seconds
-                reactor.callLater(3, self.sendHeartbeat) 
+                reactor.callLater(3,
+                    self.sendHeartbeat) # Server has not finished loading yet - come back in 3 seconds maybe?
             return
         try:
             self._sendHeartbeat()
         except ImportError:
-            self.logger.info("WoM heartbeat has SSL enabled, and OpenSSL is not installed on the system. Falling back to minecraft.net heartbeat.")
+            self.logger.info(
+                "WoM heartbeat has SSL enabled, and OpenSSL is not installed on the system. Falling back to minecraft.net heartbeat.")
             self._sendHeartbeat(True)
 
     def _sendHeartbeat(self, overrideurl=False):

@@ -1148,6 +1148,7 @@ class ArcServerProtocol(Protocol):
         return False
 
     def GetBlockValue(self, value):
+        max_blocks = 65
         # Try getting the block as a direct integer type.
         try:
             block = chr(int(value))
@@ -1158,8 +1159,10 @@ class ArcServerProtocol(Protocol):
             except KeyError:
                 self.sendServerMessage("'%s' is not a valid block type." % value)
                 return None
-            # Check the block is valid
-        if ord(block) > 49:
+        # Check the block is valid
+        if not self.supports_cpe or self.cpe_b_supportlevel < 1:
+            max_blocks = 49
+        if ord(block) > max_blocks:
             self.sendServerMessage("'%s' is not a valid block type." % value)
             return None
         op_blocks = [BLOCK_SOLID, BLOCK_WATER, BLOCK_LAVA]
